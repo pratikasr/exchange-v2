@@ -275,12 +275,13 @@ pub fn place_order(
     ORDER_COUNT.save(deps.storage, &order_id)?;
 
     // Match the order
-    let (matched_amount, remaining_amount) = match_orders(&mut deps, &env, &order)?;
+    let (matched_amount, matched_bets) = match_orders(&mut deps, &env, &order)?;
 
     // Update order status based on matching result
     let mut updated_order = ORDERS.load(deps.storage, order_id)?;
     if matched_amount == amount {
         updated_order.status = OrderStatus::Filled;
+        updated_order.amount = matched_amount;  // Set amount to matched amount
     } else if matched_amount > Uint128::zero() {
         updated_order.status = OrderStatus::PartiallyFilled;
     }
@@ -293,7 +294,7 @@ pub fn place_order(
         .add_attribute("method", "place_order")
         .add_attribute("order_id", order_id.to_string())
         .add_attribute("matched_amount", matched_amount.to_string())
-        .add_attribute("remaining_matched_bets", remaining_amount.len().to_string());
+        .add_attribute("remaining_matched_bets", matched_bets.len().to_string());
 
     if excess_funds > Uint128::zero() {
         let refund_msg = BankMsg::Send {
@@ -335,6 +336,7 @@ pub fn cancel_order(
 
     // Update order status
     order.status = OrderStatus::Canceled;
+    order.amount = order.filled_amount;  // Set the amount to the filled amount
     ORDERS.save(deps.storage, order_id, &order)?;
 
     // Prepare refund message
@@ -365,16 +367,17 @@ pub fn match_orders(deps: &mut DepsMut, env: &Env, new_order: &Order) -> Result<
             order.market_id == new_order.market_id && 
             order.option_id == new_order.option_id && 
             order.side == opposite_side &&
-            (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled)
+            (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled) &&
+            order.amount > order.filled_amount
         })
         .map(|r| r.unwrap().1)
         .collect();
 
     orders.sort_by(|a, b| {
         if new_order.side == OrderSide::Back {
-            b.odds.cmp(&a.odds)
-        } else {
             a.odds.cmp(&b.odds)
+        } else {
+            b.odds.cmp(&a.odds)
         }
     });
 
@@ -383,7 +386,26 @@ pub fn match_orders(deps: &mut DepsMut, env: &Env, new_order: &Order) -> Result<
             break;
         }
 
-        let match_amount = std::cmp::min(new_order.amount - matched_amount, order.amount - order.filled_amount);
+        // Recheck the order status and available amount
+        if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
+            continue;
+        }
+        let available_amount = order.amount - order.filled_amount;
+        if available_amount == Uint128::zero() {
+            continue;
+        }
+
+        // Check if the odds are favorable for matching
+        let odds_match = match new_order.side {
+            OrderSide::Back => new_order.odds >= order.odds,
+            OrderSide::Lay => new_order.odds <= order.odds,
+        };
+
+        if !odds_match {
+            continue;
+        }
+
+        let match_amount = std::cmp::min(new_order.amount - matched_amount, available_amount);
 
         let matched_bet_id = MATCHED_BET_COUNT.load(deps.storage)? + 1;
         let matched_bet = MatchedBet {
@@ -974,7 +996,9 @@ pub fn query_market_orders(
         .filter(|r| {
             if let Ok((_, order)) = r {
                 order.market_id == market_id && 
-                side.as_ref().map_or(true, |s| order.side.to_string() == *s)
+                side.as_ref().map_or(true, |s| order.side.to_string() == *s) &&
+                (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled) &&
+                order.amount > order.filled_amount
             } else {
                 false
             }
