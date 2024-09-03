@@ -29,7 +29,7 @@ comdex tx wasm store artifacts/exchange_v2.wasm \
 --chain-id test-1  \
 -y --fees 200000000ucmdx --gas 100000000
 
-comdex tx wasm migrate comdex14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9spunaxy 4 "{}" --from cooluser --keyring-backend test --chain-id test-1 -y --fees 4000000ucmdx
+comdex tx wasm migrate comdex14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9spunaxy 2 "{}" --from cooluser --keyring-backend test --chain-id test-1 -y --fees 4000000ucmdx
 
 INSTANTIATE_MSG='{
     "admin": "comdex1c0vnmvdpkn8h4phaejmj2kpgqunxcxnjjxd7n3",

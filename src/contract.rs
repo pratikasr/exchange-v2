@@ -234,6 +234,8 @@ pub fn place_order(
 
     // Check if the bet amount is above the minimum
     if amount < config.min_bet {
+        println!("amount: {:?}", amount);
+        println!("config.min_bet: {:?}", config.min_bet);
         return Err(ContractError::BetTooSmall {});
     }
 
@@ -358,7 +360,6 @@ pub fn cancel_order(
 pub fn match_orders(deps: &mut DepsMut, env: &Env, new_order: &Order) -> Result<(Uint128, Vec<MatchedBet>), ContractError> {
     let mut matched_amount = Uint128::zero();
     let mut matched_bets = Vec::new();
-
     let opposite_side = if new_order.side == OrderSide::Back { OrderSide::Lay } else { OrderSide::Back };
     let mut orders: Vec<Order> = ORDERS
         .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
@@ -373,38 +374,31 @@ pub fn match_orders(deps: &mut DepsMut, env: &Env, new_order: &Order) -> Result<
         .map(|r| r.unwrap().1)
         .collect();
 
+    // Sort orders based on the new order's side
     orders.sort_by(|a, b| {
-        if new_order.side == OrderSide::Back {
-            a.odds.cmp(&b.odds)
-        } else {
-            b.odds.cmp(&a.odds)
+        match new_order.side {
+            OrderSide::Back => b.odds.cmp(&a.odds), // For back, we want lowest lay odds first
+            OrderSide::Lay => a.odds.cmp(&b.odds),  // For lay, we want highest back odds first
         }
     });
+
 
     for mut order in orders {
         if matched_amount == new_order.amount {
             break;
         }
 
-        // Recheck the order status and available amount
-        if order.status != OrderStatus::Open && order.status != OrderStatus::PartiallyFilled {
-            continue;
-        }
-        let available_amount = order.amount - order.filled_amount;
-        if available_amount == Uint128::zero() {
-            continue;
-        }
-
         // Check if the odds are favorable for matching
         let odds_match = match new_order.side {
             OrderSide::Back => new_order.odds >= order.odds,
-            OrderSide::Lay => new_order.odds <= order.odds,
+            OrderSide::Lay => new_order.odds >= order.odds, // Changed this line
         };
 
         if !odds_match {
-            continue;
+            break; // Changed from continue to break
         }
 
+        let available_amount = order.amount - order.filled_amount;
         let match_amount = std::cmp::min(new_order.amount - matched_amount, available_amount);
 
         let matched_bet_id = MATCHED_BET_COUNT.load(deps.storage)? + 1;
@@ -2051,6 +2045,87 @@ mod tests {
         env.block.time = env.block.time.plus_seconds(86401);
         let res = execute(deps.as_mut(), env, mock_info(ADMIN, &[]), resolve_msg);
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_order_matching_with_different_odds() {
+        let mut deps = mock_dependencies();
+        let env = mock_env();
+        setup_contract(deps.as_mut());
+
+        // Create a market
+        let market_id = create_active_market(deps.as_mut(), env.clone());
+
+        // Place a back order at 2.2 odds
+        let back_order_msg = ExecuteMsg::PlaceOrder { 
+            market_id,
+            option_id: 0,
+            order_type: OrderType::Limit,
+            side: OrderSide::Back,
+            amount: Uint128::new(70000000),
+            odds: 220, // 2.2 in percentage format
+        };
+        let _ = execute(deps.as_mut(), env.clone(), mock_info(USER1, &[Coin { denom: TOKEN_DENOM.to_string(), amount: Uint128::new(70000000) }]), back_order_msg).unwrap();
+
+        // Place a lay order at 1.5 odds
+        let lay_order_msg = ExecuteMsg::PlaceOrder { 
+            market_id,
+            option_id: 0,
+            order_type: OrderType::Limit,
+            side: OrderSide::Lay,
+            amount: Uint128::new(50000000),
+            odds: 150, // 1.5 in percentage format
+        };
+        let res = execute(deps.as_mut(), env.clone(), mock_info(USER2, &[Coin { denom: TOKEN_DENOM.to_string(), amount: Uint128::new(25000000) }]), lay_order_msg).unwrap();
+
+        // Check that the orders were not matched
+        assert_eq!(
+            res.attributes
+                .iter()
+                .find(|attr| attr.key == "matched_amount")
+                .map(|attr| attr.value.as_str()),
+            Some("0")
+        );
+
+        // Query the order book to verify both orders are still open
+        let res: Vec<Order> = from_json(&query(deps.as_ref(), env.clone(), QueryMsg::MarketOrders { market_id, side: None, start_after: None, limit: None }).unwrap()).unwrap();
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].side, OrderSide::Back);
+        assert_eq!(res[0].odds, 220);
+        assert_eq!(res[0].amount, Uint128::new(70000000));
+        assert_eq!(res[0].status, OrderStatus::Open);
+        assert_eq!(res[1].side, OrderSide::Lay);
+        assert_eq!(res[1].odds, 150);
+        assert_eq!(res[1].amount, Uint128::new(50000000));
+        assert_eq!(res[1].status, OrderStatus::Open);
+
+        // Now place a matching lay order at 2.2 odds
+        let matching_lay_order_msg = ExecuteMsg::PlaceOrder { 
+            market_id,
+            option_id: 0,
+            order_type: OrderType::Limit,
+            side: OrderSide::Lay,
+            amount: Uint128::new(70000000),
+            odds: 220, // 2.2 in percentage format
+        };
+        let res = execute(deps.as_mut(), env.clone(), mock_info(USER3, &[Coin { denom: TOKEN_DENOM.to_string(), amount: Uint128::new(84000000) }]), matching_lay_order_msg).unwrap();
+
+        // Check that the orders were matched
+        assert_eq!(
+            res.attributes
+                .iter()
+                .find(|attr| attr.key == "matched_amount")
+                .map(|attr| attr.value.as_str()),
+            Some("70000000")
+        );
+
+        // Query the order book to verify the back order is filled and the lay order at 1.5 is still open
+        let res: Vec<Order> = from_json(&query(deps.as_ref(), env, QueryMsg::MarketOrders { market_id, side: None, start_after: None, limit: None }).unwrap()).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].side, OrderSide::Lay);
+        assert_eq!(res[0].odds, 150);
+        assert_eq!(res[0].amount, Uint128::new(50000000));
+        assert_eq!(res[0].status, OrderStatus::Open);
     }
 
 }
