@@ -8,6 +8,7 @@ use crate::msg::OrderType;
 use std::str::FromStr;
 use crate::msg::QueryMsg;
 use cw_storage_plus::Bound;
+use regex::Regex;
 
 
 #[cfg_attr(not(feature = "library"), entry_point)]
@@ -111,6 +112,9 @@ pub fn create_market(
         return Err(ContractError::InvalidTimeRange {});
     }
 
+    // Validate question format
+    validate_question(&question)?;
+
     // Check if the correct amount of funds is sent for resolution_reward
     let required_funds = resolution_reward;
     let sent_funds = info.funds.iter().find(|coin| coin.denom == config.token_denom);
@@ -146,8 +150,17 @@ pub fn create_market(
         .add_attribute("creator", info.sender))
 }
 
+
+fn validate_question(question: &str) -> Result<(), ContractError> {
+    let re = Regex::new(r"^[A-Za-z0-9\s\?\.,!-]{10,200}$").unwrap();
+    if !re.is_match(question) {
+        return Err(ContractError::InvalidQuestionFormat {});
+    }
+    Ok(())
+}
+
 pub fn cancel_market(
-    deps: DepsMut,
+    mut deps: DepsMut,
     info: MessageInfo,
     market_id: u64,
 ) -> Result<Response, ContractError> {
@@ -167,15 +180,100 @@ pub fn cancel_market(
     market.status = MarketStatus::Canceled;
     MARKETS.save(deps.storage, market_id, &market)?;
 
-    // TODO: Implement logic to refund all bets
+    //Implement logic to refund all bets
+    let refund_messages = refund_all_bets(&mut deps, market_id)?;
 
     Ok(Response::new()
+        .add_messages(refund_messages)
         .add_attribute("method", "cancel_market")
         .add_attribute("market_id", market_id.to_string()))
 }
 
+fn refund_all_bets(deps: &mut DepsMut, market_id: u64) -> Result<Vec<CosmosMsg>, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    let mut refund_messages = Vec::new();
+
+    // Refund open and partially filled orders
+    let orders: Vec<Order> = ORDERS
+        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .filter_map(|r| {
+            let order = r.unwrap().1;
+            if order.market_id == market_id && 
+               (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled) {
+                Some(order)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for mut order in orders {
+        let refund_amount = match order.side {
+            OrderSide::Back => order.amount - order.filled_amount,
+            OrderSide::Lay => (order.amount - order.filled_amount).multiply_ratio(order.odds - 100, 100u128),
+        };
+
+        if refund_amount > Uint128::zero() {
+            let refund_msg = CosmosMsg::Bank(BankMsg::Send {
+                to_address: order.creator.to_string(),
+                amount: vec![Coin {
+                    denom: config.token_denom.clone(),
+                    amount: refund_amount,
+                }],
+            });
+            refund_messages.push(refund_msg);
+
+            // Update order status
+            order.status = OrderStatus::Canceled;
+            ORDERS.save(deps.storage, order.id, &order)?;
+        }
+    }
+
+    // Refund matched bets
+    let matched_bets: Vec<MatchedBet> = MATCHED_BETS
+        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .filter_map(|r| {
+            let matched_bet = r.unwrap().1;
+            if matched_bet.market_id == market_id && !matched_bet.redeemed {
+                Some(matched_bet)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for mut matched_bet in matched_bets {
+        // Refund back user
+        let back_refund_msg = CosmosMsg::Bank(BankMsg::Send {
+            to_address: matched_bet.back_user.to_string(),
+            amount: vec![Coin {
+                denom: config.token_denom.clone(),
+                amount: matched_bet.amount,
+            }],
+        });
+        refund_messages.push(back_refund_msg);
+
+        // Refund lay user
+        let lay_amount = matched_bet.amount.multiply_ratio(matched_bet.odds - 100, 100u128);
+        let lay_refund_msg = CosmosMsg::Bank(BankMsg::Send {
+            to_address: matched_bet.lay_user.to_string(),
+            amount: vec![Coin {
+                denom: config.token_denom.clone(),
+                amount: lay_amount,
+            }],
+        });
+        refund_messages.push(lay_refund_msg);
+
+        // Mark matched bet as redeemed
+        matched_bet.redeemed = true;
+        MATCHED_BETS.save(deps.storage, matched_bet.id, &matched_bet)?;
+    }
+
+    Ok(refund_messages)
+}
+
 pub fn close_market(
-    deps: DepsMut,
+    mut deps: DepsMut,
     env: Env,
     info: MessageInfo,
     market_id: u64,
@@ -201,9 +299,59 @@ pub fn close_market(
     market.status = MarketStatus::Closed;
     MARKETS.save(deps.storage, market_id, &market)?;
 
+     // Refund unmatched orders
+     let refund_messages = refund_unmatched_orders(&mut deps, market_id)?;
+
     Ok(Response::new()
+        .add_messages(refund_messages)
         .add_attribute("method", "close_market")
         .add_attribute("market_id", market_id.to_string()))
+}
+
+pub fn refund_unmatched_orders(
+    deps: &mut DepsMut,
+    market_id: u64,
+) -> Result<Vec<CosmosMsg>, ContractError> {
+    let config = CONFIG.load(deps.storage)?;
+    let mut refund_messages = Vec::new();
+
+    let orders: Vec<Order> = ORDERS
+        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .filter_map(|r| {
+            let order = r.unwrap().1;
+            if order.market_id == market_id && 
+               (order.status == OrderStatus::Open || order.status == OrderStatus::PartiallyFilled) {
+                Some(order)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    for mut order in orders {
+        let refund_amount = match order.side {
+            OrderSide::Back => order.amount - order.filled_amount,
+            OrderSide::Lay => (order.amount - order.filled_amount).multiply_ratio(order.odds - 100, 100u128),
+        };
+
+        if refund_amount > Uint128::zero() {
+            let refund_msg = CosmosMsg::Bank(BankMsg::Send {
+                to_address: order.creator.to_string(),
+                amount: vec![Coin {
+                    denom: config.token_denom.clone(),
+                    amount: refund_amount,
+                }],
+            });
+            refund_messages.push(refund_msg);
+
+            // Update order status
+            order.status = OrderStatus::Canceled;
+            order.amount = order.filled_amount;
+            ORDERS.save(deps.storage, order.id, &order)?;
+        }
+    }
+
+    Ok(refund_messages)
 }
 
 pub fn place_order(

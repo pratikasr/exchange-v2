@@ -19,15 +19,22 @@ comdex start
 
 ## Contract Address
 comdex14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9spunaxy
-
-
+comdex14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9spunaxy
+http://95.216.154.108:1317/cosmwasm/wasm/v1/contract/comdex14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9spunaxy/smart/eyJnZXRfY29uZmlnIjoge319
 ### Instantiate Contract
 ```bash
 
-comdex tx wasm store artifacts/exchange_v2.wasm \
+comdex tx wasm store exchange_v2.wasm \
 --from cooluser --keyring-backend test \
 --chain-id test-1  \
 -y --fees 200000000ucmdx --gas 100000000
+
+
+
+osmosisd tx wasm store artifacts/exchange_v2.wasm \
+--from cooluser --keyring-backend test \
+--chain-id osmo-test-5  \
+-y --fees 2000000uosmo --gas 20000000 --node https://rpc.testnet.osmosis.zone 
 
 comdex tx wasm migrate comdex14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9spunaxy 2 "{}" --from cooluser --keyring-backend test --chain-id test-1 -y --fees 4000000ucmdx
 
@@ -46,6 +53,22 @@ INSTANTIATE_MSG='{
 
 comdex tx wasm instantiate 1 "$INSTANTIATE_MSG" --from cooluser --keyring-backend test --label "AIB Exchange V2" --gas auto --gas-adjustment 1.3  --chain-id test-1 --admin comdex1c0vnmvdpkn8h4phaejmj2kpgqunxcxnjjxd7n3 -y --fees 200000000ucmdx
 
+11229
+
+6BE562396A549DB59C24283FBC63DF3F218E4398D907B9DDB7913D730064BB0C -store
+EBA7790C32ADC0EEAB89FB1D815175C30EF0DDD05F1C70FE3E43F37829DBA000 -instantiate
+osmo1vtj94ynfg8mdk4hvr56v7z6u3sxzuxmxypkgmjsvw5r5tx0752ns8hmjvw -contract Address
+INSTANTIATE_MSG='{
+    "admin": "osmo1c0vnmvdpkn8h4phaejmj2kpgqunxcxnjajuvu5",
+    "token_denom": "uosmo",
+    "platform_fee": "100",
+    "treasury": "osmo1c0vnmvdpkn8h4phaejmj2kpgqunxcxnjajuvu5",
+    "challenging_period": 86400,
+    "voting_period": 43200,
+    "min_bet": "1000000",
+    "whitelist_enabled": true
+}'
+osmosisd tx wasm instantiate 11229 "$INSTANTIATE_MSG" --from cooluser --keyring-backend test --label "Prediction Market Exchange V2" --gas auto --gas-adjustment 1.3  --chain-id osmo-test-5 --admin osmo1c0vnmvdpkn8h4phaejmj2kpgqunxcxnjajuvu5 -y --fees 2000000uosmo --node https://rpc.testnet.osmosis.zone 
 ```
 
 Note: Replace `[CODE_ID]` with the actual code ID of your uploaded contract, and `[ADMIN_ADDRESS]` with the address of the admin account.

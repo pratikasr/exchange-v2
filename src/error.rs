@@ -92,6 +92,9 @@ pub enum ContractError {
     
     #[error("Address is already whitelisted")]
     AlreadyWhitelisted {},
+
+    #[error("Invalid question format")]
+    InvalidQuestionFormat {},
     
     #[error("Custom Error val: {val:?}")]
     CustomError { val: String },
