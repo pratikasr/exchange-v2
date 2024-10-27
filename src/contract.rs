@@ -18,6 +18,17 @@ pub fn instantiate(
     _info: MessageInfo,
     msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
+    // Fix Bug ID #13: Validate non-zero addresses
+    validate_non_zero_addr(&msg.admin)?;
+    validate_non_zero_addr(&msg.treasury)?;
+
+    // Fix Bug #14 & #15: Validate both periods
+    validate_period(msg.challenging_period, "challenging_period")?;
+    validate_period(msg.voting_period, "voting_period")?;
+
+    // Fix Bug #16: Validate min_bet
+    validate_min_bet(msg.min_bet)?;
+
     let config = Config {
         admin: msg.admin,
         token_denom: msg.token_denom,
@@ -60,13 +71,41 @@ pub fn update_config(
     }
 
     match field.as_str() {
-        "admin" => config.admin = deps.api.addr_validate(&value)?,
+        "admin" => {
+            let new_admin = deps.api.addr_validate(&value)?;
+            // Fix Bug ID #13: Validate non-zero address
+            validate_non_zero_addr(&new_admin)?;
+            config.admin = new_admin;
+        },
         "token_denom" => config.token_denom = value.clone(),
         "platform_fee" => config.platform_fee = value.parse::<Uint128>()?,
-        "treasury" => config.treasury = deps.api.addr_validate(&value)?,
-        "challenging_period" => config.challenging_period = u64::from_str(&value).map_err(|_| ContractError::InvalidField { field: field.clone() })?,
-        "voting_period" => config.voting_period = u64::from_str(&value).map_err(|_| ContractError::InvalidField { field: field.clone() })?,
-        "min_bet" => config.min_bet = Uint128::from_str(&value).map_err(|_| ContractError::InvalidField { field: field.clone() })?,
+        "treasury" => {
+            let new_treasury = deps.api.addr_validate(&value)?;
+            // Fix Bug ID #13: Validate non-zero address
+            validate_non_zero_addr(&new_treasury)?;
+            config.treasury = new_treasury;
+        },        
+        "challenging_period" => {
+            let period = u64::from_str(&value)
+                .map_err(|_| ContractError::InvalidField { field: field.clone() })?;
+            // Fix Bug #14: Validate challenging period
+            validate_period(period, &field)?;
+            config.challenging_period = period;
+        },
+        "voting_period" => {
+            let period = u64::from_str(&value)
+                .map_err(|_| ContractError::InvalidField { field: field.clone() })?;
+            // Fix Bug #15: Validate voting period
+            validate_period(period, &field)?;
+            config.voting_period = period;
+        },
+        "min_bet" => {
+            let min_bet = Uint128::from_str(&value)
+                .map_err(|_| ContractError::InvalidField { field: field.clone() })?;
+            // Fix Bug #16: Validate min_bet
+            validate_min_bet(min_bet)?;
+            config.min_bet = min_bet;
+        },        
         "whitelist_enabled" => config.whitelist_enabled = bool::from_str(&value).map_err(|_| ContractError::InvalidField { field: field.clone() })?,
         _ => return Err(ContractError::InvalidField { field: field.to_string() }),
     }
@@ -79,8 +118,30 @@ pub fn update_config(
         .add_attribute("value", value))
 }
 
+fn validate_non_zero_addr(addr: &Addr) -> Result<(), ContractError> {
+    if addr == &Addr::unchecked("") {
+        return Err(ContractError::ZeroAddress {});
+    }
+    Ok(())
+}
+
+fn validate_period(period: u64, field: &str) -> Result<(), ContractError> {
+    if period == 0 {
+        return Err(ContractError::InvalidPeriod { field: field.to_string() });
+    }
+    Ok(())
+}
+
+fn validate_min_bet(amount: Uint128) -> Result<(), ContractError> {
+    if amount.is_zero() {
+        return Err(ContractError::InvalidMinBet {});
+    }
+    Ok(())
+}
+
 pub fn create_market(
     deps: DepsMut,
+    env: Env,
     info: MessageInfo,
     category: String,
     question: String, 
@@ -93,6 +154,20 @@ pub fn create_market(
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
+    // Fix Bug ID #11: Validate resolution_bond
+    if resolution_bond.is_zero() || resolution_bond < config.min_bet {
+        return Err(ContractError::InvalidResolutionBond {});
+    }
+
+    // Parse times
+    let start_time = start_time.parse::<u64>().map_err(|_| ContractError::InvalidTimeFormat {})?;
+    let end_time = end_time.parse::<u64>().map_err(|_| ContractError::InvalidTimeFormat {})?;
+
+    // Fix Bug ID #12: Validate start_time is in the future
+    if start_time <= env.block.time.seconds() {
+        return Err(ContractError::InvalidTimeRange {});
+    }
+
     // Check if whitelist is enabled and if so, if the creator is whitelisted
     if config.whitelist_enabled {
         let is_whitelisted = crate::state::WHITELISTED_ADDRESSES.may_load(deps.storage, info.sender.clone())?.unwrap_or(false);
@@ -100,9 +175,6 @@ pub fn create_market(
             return Err(ContractError::NotWhitelisted {});
         }
     }
-
-    let start_time = start_time.parse::<u64>().map_err(|_| ContractError::InvalidTimeFormat {})?;
-    let end_time = end_time.parse::<u64>().map_err(|_| ContractError::InvalidTimeFormat {})?;
 
     // Validate input parameters
     if options.is_empty() || options.len() > 10 {
@@ -114,6 +186,9 @@ pub fn create_market(
 
     // Validate question format
     validate_question(&question)?;
+
+    // Fix Bug ID #17: Validate description
+    validate_description(&description)?;
 
     // Check if the correct amount of funds is sent for resolution_reward
     let required_funds = resolution_reward;
@@ -156,6 +231,21 @@ fn validate_question(question: &str) -> Result<(), ContractError> {
     if !re.is_match(question) {
         return Err(ContractError::InvalidQuestionFormat {});
     }
+    Ok(())
+}
+
+fn validate_description(description: &str) -> Result<(), ContractError> {
+    // Description should be between 20 and 1000 characters
+    if description.len() < 20 || description.len() > 1000 {
+        return Err(ContractError::InvalidDescriptionLength {});
+    }
+
+    // Check if description contains only valid characters
+    let re = Regex::new(r"^[A-Za-z0-9\s\.,!?-]{20,1000}$").unwrap();
+    if !re.is_match(description) {
+        return Err(ContractError::InvalidDescriptionFormat {});
+    }
+
     Ok(())
 }
 
@@ -377,7 +467,11 @@ pub fn place_order(
     if env.block.time.seconds() > market.end_time {
         market.status = MarketStatus::Closed;
         MARKETS.save(deps.storage, market_id, &market)?;
-        return Err(ContractError::MarketClosed {});
+        // Fix Bug ID #6: Return Ok instead of Err to avoid transaction revert
+        return Ok(Response::new()
+            .add_attribute("action", "market_closed")
+            .add_attribute("market_id", market_id.to_string())
+            .add_attribute("message", "Market is closed, no more orders can be placed"));
     }
 
     // Check if the bet amount is above the minimum
@@ -387,15 +481,22 @@ pub fn place_order(
         return Err(ContractError::BetTooSmall {});
     }
 
-    // Validate odds (must be between 1 and 99)
-    if odds < 100 || odds > 9900 {
+    // Fix Bug ID #20: Use Rust's range feature for more idiomatic validation
+    if !(100..=9900).contains(&odds) {
         return Err(ContractError::InvalidOdds {});
     }
 
-    // Check if sufficient funds are sent
+    // Calculate required amount
     let required_amount = match side {
         OrderSide::Back => amount,
-        OrderSide::Lay => amount.multiply_ratio(odds - 100, 100u128),
+        OrderSide::Lay => {
+            // Fix Bug ID #1: Ensure required_amount is never zero for Lay orders
+            let lay_amount = amount.multiply_ratio(odds - 100, 100u128);
+            if lay_amount.is_zero() {
+                return Err(ContractError::InvalidOdds {});
+            }
+            lay_amount
+        }
     };
 
     // Check if sufficient funds are sent
@@ -578,7 +679,8 @@ pub fn match_orders(deps: &mut DepsMut, env: &Env, new_order: &Order) -> Result<
             order.status = OrderStatus::PartiallyFilled;
         }
 
-        ORDERS.save(deps.storage, order.id, &order)?;
+        // Fix Bug ID #21: Remove unnecessary reference creation
+        ORDERS.save(deps.storage, order.id, order)?;
     }
 
     let mut updated_new_order = new_order.clone();
@@ -659,16 +761,19 @@ pub fn add_to_whitelist(
         return Err(ContractError::Unauthorized {});
     }
 
+    // Fix Bug ID #9: Validate and normalize the address
+    let validated_address = deps.api.addr_validate(&address.to_string().to_lowercase())?;
+
     // Check if the address is already whitelisted
-    if WHITELISTED_ADDRESSES.may_load(deps.storage, address.clone())?.is_some() {
+    if WHITELISTED_ADDRESSES.may_load(deps.storage, validated_address.clone())?.is_some() {
         return Err(ContractError::AlreadyWhitelisted {});
     }
 
-    WHITELISTED_ADDRESSES.save(deps.storage, address.clone(), &true)?;
+    WHITELISTED_ADDRESSES.save(deps.storage, validated_address.clone(), &true)?;
 
     Ok(Response::new()
         .add_attribute("method", "add_to_whitelist")
-        .add_attribute("address", address.to_string()))
+        .add_attribute("address", validated_address.to_string()))
 }
 
 pub fn remove_from_whitelist(
@@ -682,12 +787,14 @@ pub fn remove_from_whitelist(
     if info.sender != config.admin {
         return Err(ContractError::Unauthorized {});
     }
+     // Fix Bug ID #9: Validate and normalize the address
+    let validated_address = deps.api.addr_validate(&address.to_string().to_lowercase())?;
 
-    WHITELISTED_ADDRESSES.remove(deps.storage, address.clone());
+    WHITELISTED_ADDRESSES.remove(deps.storage, validated_address.clone());
 
     Ok(Response::new()
         .add_attribute("method", "remove_from_whitelist")
-        .add_attribute("address", address.to_string()))
+        .add_attribute("address", validated_address.to_string()))
 }
 
 pub fn propose_market_result(
@@ -700,16 +807,24 @@ pub fn propose_market_result(
     let config = CONFIG.load(deps.storage)?;
     let mut market = MARKETS.load(deps.storage, market_id)?;
 
+    // Fix Bug ID #5: Ensure market is already properly closed
+    if market.status != MarketStatus::Closed {
+        return Err(ContractError::InvalidMarketState {});
+    }
+
+    // Fix Bug ID #3: Check if market is canceled
+    if market.status == MarketStatus::Canceled {
+        return Err(ContractError::InvalidMarketState {});
+    }
+
     // Check if the market end time has passed
     if env.block.time.seconds() <= market.end_time {
         return Err(ContractError::MarketNotEnded {});
     }
 
-    // Check if a proposal already exists and is active
-    if let Some(proposal) = PROPOSALS.may_load(deps.storage, market_id)? {
-        if proposal.status == ProposalStatus::Active {
-            return Err(ContractError::ProposalAlreadyExists {});
-        }
+    // Fix Bug ID #4: Check if any proposal exists regardless of status
+    if PROPOSALS.may_load(deps.storage, market_id)?.is_some() {
+        return Err(ContractError::ProposalAlreadyExists {});
     }
 
     // Check if the correct bond amount is sent
@@ -803,6 +918,11 @@ pub fn cast_vote(
     market_id: u64,
     vote: u8,
 ) -> Result<Response, ContractError> {
+    // Fix Bug ID #7: Validate vote is either 0 or 1
+    if vote > 1 {
+        return Err(ContractError::InvalidVote {});
+    }
+
     let config = CONFIG.load(deps.storage)?;
     let market = MARKETS.load(deps.storage, market_id)?;
     let dispute = DISPUTES.load(deps.storage, market_id)?;
@@ -1004,7 +1124,7 @@ pub fn execute(
     match msg {
         ExecuteMsg::UpdateConfig { field, value } => update_config(deps, info, field, value),
         ExecuteMsg::CreateMarket { category, question, description, options, start_time, end_time, resolution_bond, resolution_reward } => 
-            create_market(deps, info, category, question, description, options, start_time, end_time, resolution_bond, resolution_reward),
+            create_market(deps, env, info, category, question, description, options, start_time, end_time, resolution_bond, resolution_reward),
         ExecuteMsg::CancelMarket { market_id } => cancel_market(deps, info, market_id),
         ExecuteMsg::CloseMarket { market_id } => close_market(deps, env, info, market_id),
         ExecuteMsg::ProposeResult { market_id, winning_outcome } => propose_market_result(deps, env, info, market_id, winning_outcome),
@@ -1018,6 +1138,7 @@ pub fn execute(
             raise_dispute(deps, env, info, market_id, proposed_outcome, evidence),
         ExecuteMsg::CastVote { market_id, outcome } => cast_vote(deps, env, info, market_id, outcome),
         ExecuteMsg::ResolveDispute { market_id } => resolve_dispute(deps, env, info, market_id),
+        ExecuteMsg::RedeemBondAmount { market_id } => redeem_bond_amount(deps, env, info, market_id), // Fix Bug ID #2
     }
 }
 
@@ -1193,10 +1314,10 @@ pub fn query_votes(deps: Deps, market_id: u64) -> StdResult<(Vec<Vote>, Vec<(u8,
         .map(|item| item.map(|(_, vote)| vote))
         .collect::<StdResult<Vec<Vote>>>()?;
 
+    // Fix Bug ID #22: Remove unnecessary identity mapping
     let vote_counts: Vec<(u8, u64)> = VOTE_COUNTS
         .prefix(market_id)
         .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
-        .map(|item| item.map(|(option_id, count)| (option_id, count)))
         .collect::<StdResult<Vec<(u8, u64)>>>()?;
 
     Ok((votes, vote_counts))

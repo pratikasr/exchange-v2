@@ -98,4 +98,25 @@ pub enum ContractError {
     
     #[error("Custom Error val: {val:?}")]
     CustomError { val: String },
+
+    #[error("Invalid vote value. Must be 0 or 1")]
+    InvalidVote {},
+
+    #[error("Invalid resolution bond amount")]
+    InvalidResolutionBond {},
+
+    #[error("Zero address not allowed")]
+    ZeroAddress {},
+
+    #[error("Invalid period for {field}")]
+    InvalidPeriod { field: String },
+
+    #[error("Minimum bet amount cannot be zero")]
+    InvalidMinBet {},
+
+    #[error("Description length must be between 20 and 1000 characters")]
+    InvalidDescriptionLength {},
+    
+    #[error("Description contains invalid characters")]
+    InvalidDescriptionFormat {},
 }

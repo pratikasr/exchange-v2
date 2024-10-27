@@ -54,6 +54,7 @@ pub enum ExecuteMsg {
     },
     CastVote { market_id: u64, outcome: u8 },
     ResolveDispute { market_id: u64 },
+    RedeemBondAmount { market_id: u64 }, // Fix Bug ID #2
 }
 
 #[cw_serde]
